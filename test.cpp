@@ -3,12 +3,15 @@
 #include <random>
 #include <limits>
 #include <thread>
+#include <algorithm>
+#include <cmath>
 
 namespace autil {
 
 	uint32_t  test::Rz = 0;
 	uint32_t  test::Rw = 0;
 
+	const float PI = std::atan(1.0f) * 4;
 
 	void test::generateMusic(float *buf, int len, bool initalSilence)
 	{
@@ -39,7 +42,6 @@ namespace autil {
 
 	void test::generateNoise(float *buf, int len) {
 		for (int i = 0; i < len; i++) {
-			auto v = fastRand();
 			buf[i] = static_cast <float> (fastRand()) / static_cast <float> (std::numeric_limits<uint32_t>::max()) * 2.0f - 1.0f;
 		}
 	}
@@ -49,5 +51,26 @@ namespace autil {
 		auto tid = std::hash<std::thread::id>{}(std::this_thread::get_id());
 		uint32_t iseed = (uint32_t)time(NULL) ^ ((tid & 65535) << 16);
 		Rw = Rz = iseed;
+	}
+
+	void test::generateSweep(float *buf, int len) {
+		const float bw = 2.0f / 12.0f;
+		const float fMin = 5.0f, fMax = 20000.0f;
+		const float sr = 44100;
+
+		float f1 = fMin * std::pow(2.0f, -bw);
+		float f2 = (std::min)(fMax * std::pow(2.0f, bw), sr / 2);
+		float L = (float)(len - 1) / std::log(f2 / f1);
+
+		for (int i = 0; i < len; i++) {
+			buf[i] = std::sin(2.0f * PI *f1* L / sr * (std::exp(((float)i) / L) - 1.0f));
+		}
+
+		// fade out using hann window
+		int fadeLen = std::round(100.0f * sr / f2 + 2.0f);
+		for (int i = 0; i < fadeLen; i++) {
+			float h = std::cos(PI *0.5f * ((float)i) / (float)(fadeLen - 1));
+			buf[len - fadeLen + i] *= h*h;
+		}
 	}
 }

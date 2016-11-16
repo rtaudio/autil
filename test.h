@@ -21,6 +21,8 @@ public:
 	static void generateMusic(float *buf, int len, bool inititalSilence = false);
 	static void generateNoise(float *buf, int len);
 
+	static void generateSweep(float *buf, int len);
+
 private:
 	static uint32_t Rz, Rw;
 	
