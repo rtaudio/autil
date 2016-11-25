@@ -58,11 +58,14 @@ namespace autil {
 		const float fMin = 5.0f, fMax = 20000.0f;
 		const float sr = 44100;
 
+		// 10% stop margin
+		int lenSweep = len - len/10;
+
 		float f1 = fMin * std::pow(2.0f, -bw);
 		float f2 = (std::min)(fMax * std::pow(2.0f, bw), sr / 2);
-		float L = (float)(len - 1) / std::log(f2 / f1);
+		float L = (float)(lenSweep - 1) / std::log(f2 / f1);
 
-		for (int i = 0; i < len; i++) {
+		for (int i = 0; i < lenSweep; i++) {
 			buf[i] = std::sin(2.0f * PI *f1* L / sr * (std::exp(((float)i) / L) - 1.0f));
 		}
 
@@ -70,7 +73,11 @@ namespace autil {
 		int fadeLen = std::round(100.0f * sr / f2 + 2.0f);
 		for (int i = 0; i < fadeLen; i++) {
 			float h = std::cos(PI *0.5f * ((float)i) / (float)(fadeLen - 1));
-			buf[len - fadeLen + i] *= h*h;
+			buf[lenSweep - fadeLen + i] *= h*h;
+		}
+
+		for (int i = lenSweep; i < len; i++) {
+			buf[i] = 0.0f;
 		}
 	}
 }

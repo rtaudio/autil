@@ -4,7 +4,7 @@
 #include "file_io.h"
 
 namespace autil {
-void fileio::readWave(const char * fname, std::vector<float> *buffer)
+void fileio::readWave(const std::string &fname, std::vector<float> *buffer)
 {
 	SndfileHandle file;
 
@@ -19,7 +19,7 @@ void fileio::readWave(const char * fname, std::vector<float> *buffer)
 }
 namespace fileio {
 void
-writeWave(const char * fname, std::vector<float> samples, float gain)
+writeWave(const std::string &fname, std::vector<float> samples, float gain)
 {
 	SndfileHandle file;
 	int channels = 1;

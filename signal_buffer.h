@@ -1,21 +1,37 @@
 #pragma once
 #include <stdint.h>
 #include <vector>
-
-#include<rtt.h>
-
-#include "signal_processor.h"
-
 #include <algorithm>
 #include <cmath>
 
-class UdpSocket;
+#include<rtt/rtt.h>
+
+#include "signal_processor.h"
+
+#define WITH_DEBUG_NET 1
+
+namespace autil {
+	class UdpSocket;
+}
 
 void normalize(float *vector, int len);
+inline void normalize(std::vector<float> *vector) {
+	normalize(vector->data(), vector->size());
+}
+
 void medianfilter(float* signal, float* result, int N);
 void denoise(float *vector, int len);
 
-struct SignalBuffer {
+float absmax(const float *vector, int len);
+float absmax(const std::vector<float> &vector, size_t *index = nullptr);
+float energy(const std::vector<float> &vector);
+
+struct SignalDelay {
+
+};
+
+class SignalBuffer {
+public:
 	std::string name;
 
 	float *m_timeQueue;
@@ -26,9 +42,11 @@ struct SignalBuffer {
 	float *m_freq;
 	uint32_t size, channels;
 
+	uint32_t delay;
+
 	//ITAFFT *m_fft;
 
-	UdpSocket *debugSocket;
+	autil::UdpSocket *debugSocket;
 
 
 	std::vector<SignalProcessor*> m_preProcessors;
@@ -59,19 +77,18 @@ struct SignalBuffer {
 		m_timeQueuePointer = 0;
 		//m_fft = 0;
 	}
-	SignalBuffer(uint32_t nChannels, uint32_t size) : size(size), channels(nChannels) {
+
+	SignalBuffer(const std::string &name, uint32_t nChannels, uint32_t size, uint32_t delay = 0)
+		: name(name), size(size), channels(nChannels), delay(delay) {
 		init();
 
-		m_timeQueue = new float[nChannels*(size + 0)];
+		m_timeQueue = new float[nChannels*(size + delay + 0)];
 		m_timeStage = new float[nChannels*(size + 1)];
 
 		m_freq = new float[nChannels*(size + 1) * 2]; // complex!
 
-		memset(m_timeQueue, 0, nChannels*(size + 0)*sizeof(float));
+		memset(m_timeQueue, 0, nChannels*(size + delay + 0)*sizeof(float));
 		memset(m_freq, 0, nChannels*(size + 1) * 2 * sizeof(float));
-
-		// pass dummy in/out pointers
-		//m_fft = new ITAFFT(ITAFFT::FFT_R2C, (int)size, getPtrTS(0), getPtrF(0));
 	}
 
 	SignalBuffer(float *samples, int len) : size(len), channels(1)
@@ -103,12 +120,12 @@ struct SignalBuffer {
 	// returns number of samples until full
 	void addBlock(uint32_t channel, float *block, uint32_t length) {
 		if (channel >= channels)
-			throw "Invalid channel number!";
+			throw std::out_of_range("Invalid channel number!");
 
 		if (length > size || length == 0)
-			throw "Invalid block size!";
+			throw std::out_of_range("Invalid block size!");
 
-		uint32_t untilEnd = size - m_timeQueuePointer;
+		uint32_t untilEnd = size + delay - m_timeQueuePointer;
 		bool breakBlock = (length > untilEnd);
 
 		if (breakBlock) {
@@ -134,14 +151,16 @@ struct SignalBuffer {
 		}
 
 		
-
+		// inc pointer with last channel
 		if (channel == channels - 1) {
+#ifdef WITH_DEBUG_NET
 			if (debugSocket && !breakBlock) {
 				sendDebugBlock(m_timeQueuePointer, length);
 			}
+#endif
 
 			m_timeQueuePointer += length;
-			m_timeQueuePointer = m_timeQueuePointer % size;
+			m_timeQueuePointer = m_timeQueuePointer % (size + delay);
 		}
 	}
 
@@ -176,13 +195,15 @@ struct SignalBuffer {
 
 		for (uint32_t c = 0; c < channels; c++)
 		{
-			if (m_timeQueuePointer == 0) {
-				memcpy(getPtrTS(c), getPtrTQ(c), size*sizeof(float));
-			}
-			else {
-				uint32_t untilEnd = size - m_timeQueuePointer;
-				memcpy(getPtrTS(c), &getPtrTQ(c)[m_timeQueuePointer], untilEnd*sizeof(float));
-				memcpy(getPtrTS(c) + untilEnd, getPtrTQ(c), (size - untilEnd)*sizeof(float));
+			uint32_t readFrom = (size + m_timeQueuePointer) % (size + delay);
+			uint32_t readEnd = (readFrom + size) % (size + delay);
+
+			if (readEnd >= readFrom) {
+				memcpy(getPtrTS(c), &getPtrTQ(c)[readFrom], size * sizeof(float));
+			} else {
+				uint32_t untilEnd = size + delay - readFrom;
+				memcpy(getPtrTS(c), &getPtrTQ(c)[readFrom], untilEnd*sizeof(float));
+				memcpy(getPtrTS(c) + untilEnd, getPtrTQ(c), readEnd*sizeof(float));
 			}
 		}
 	}
@@ -268,11 +289,14 @@ struct SignalBuffer {
 	}
 
 	int16_t debugBlockIndex;
+#ifdef WITH_DEBUG_NET
 	void setDebugReceiver(std::string address, int port);
 	void sendDebugBlock(uint32_t blockIndex, uint32_t blockLength);
+#endif
 };
 
-struct SignalBufferObserver {
+class SignalBufferObserver {
+public:
 	RttEvent m_evCommit;
 	std::vector<SignalBuffer*> m_hists;
 
@@ -288,6 +312,12 @@ struct SignalBufferObserver {
 			updateInterval = buf->size;
 		}
 	}
+
+	SignalBufferObserver(const std::vector<SignalBuffer *> &buffers) :commiting(false), updateInterval(-1), lastUpdate(-1) {
+		add(buffers);
+	}
+
+
 
 	SignalBufferObserver(SignalBuffer &buf) :commiting(false), updateInterval(-1), lastUpdate(-1) {
 		m_hists.push_back(&buf);
@@ -305,6 +335,20 @@ struct SignalBufferObserver {
 	
 	~SignalBufferObserver() {
 		//m_evCommit.Signal();
+	}
+
+	void add(const std::vector<SignalBuffer *> &buffers) {
+		if (buffers.size() == 0)
+			throw std::invalid_argument("Cannot observe an empty vector of SignalBuffers!");
+
+		if(updateInterval == -1)
+			updateInterval = buffers[0]->size;
+
+		for (auto b : buffers) {
+			if (b->size != updateInterval)
+				throw std::invalid_argument("Cannot observe signals of different sizes!");
+			m_hists.push_back(b);
+		}
 	}
 
 	void addHist(SignalBuffer* h) {
@@ -356,7 +400,7 @@ struct SignalBufferObserver {
 		std::vector<const float*> allData;
 
 		for (auto h : m_hists) {
-			for (int ci = 0; ci < h->channels; ci++) {
+			for (uint32_t ci = 0; ci < h->channels; ci++) {
 				allData.push_back(h->getPtrTS(ci));
 			}
 		}

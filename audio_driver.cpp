@@ -1,7 +1,9 @@
 #include "audio_driver.h"
 
+#include <vector>
 #include <fstream>
 #include <string>
+#include <string.h>
 #include <iostream>
 
 #include "signal_buffer.h"
@@ -9,7 +11,6 @@
 #include "test.h"
 
 namespace autil {
-
 	AudioDriver::AudioDriver(const std::string &name) :
 		m_totalFramesProcessed(0),
 		m_running(false),
@@ -21,8 +22,7 @@ namespace autil {
 		memset(m_bufferPool, 0, sizeof(m_bufferPool));
 
 		memset(m_bufferPortConnections, 0, sizeof(m_bufferPortConnections));
-
-
+		
 		m_jackClient = initJack();
 		m_sampleRate = jack_get_sample_rate(m_jackClient);
 		m_blockSize = jack_get_buffer_size(m_jackClient);
@@ -113,50 +113,69 @@ namespace autil {
 	}
 
 
-	std::vector<jack_port_t*> AudioDriver::createSignalPorts(SignalBuffer *buffer, std::string name, Connect connection)
+	std::vector<jack_port_t*> AudioDriver::createSignalPorts(SignalBuffer *buffer, const std::string &name, Connect connection)
 	{
 		bool isOutput = connection == Connect::ToPlayback;
 
-		auto ports = newPorts(name, buffer->channels, isOutput);
-
+		std::vector<jack_port_t*> ports;
 		buffer->name = name;
 
 		for (uint32_t c = 0; c < buffer->channels; c++) {
-			switch (connection) {
-			case Connect::ToCapture:
-				if (m_portsCapture[c] != NULL) {
-					if (jack_connect(m_jackClient, m_portsCapture[c], jack_port_name(ports[c]))) {
-						throw std::runtime_error("Cannot connect input port");
-					}
-				}
-				break;
-
-			case Connect::ToPlaybackSource:
-
-				// find ports connected to physical playback ports and "hook in"
-				if (m_portsPlayback[c] != NULL) {
-					const char **portsAudioSource = jack_port_get_all_connections(m_jackClient, jack_port_by_name(m_jackClient, m_portsPlayback[c]));
-					if (!portsAudioSource || !portsAudioSource[0]) {
-						throw std::runtime_error("Playplack port " + std::string(m_portsPlayback[c]) + " does not have any source.");
-					}
-
-					if (jack_connect(m_jackClient, portsAudioSource[0], jack_port_name(ports[c]))) {
-						throw std::runtime_error("Cannot connect input port to playback source!");
-					}
-				}
-
-				break;
-
-			case Connect::ToPlayback:
-				if (m_portsPlayback[c] != NULL) {
-					if (jack_connect(m_jackClient, jack_port_name(ports[c]), m_portsPlayback[c])) {
-						throw std::runtime_error("Cannot connect to playback port!");
-					}
-				}
-			}
+			ports.push_back(createSignalPort(name, connection, c));
 		}
 
 		return ports;
+	}
+
+
+	jack_port_t* AudioDriver::createSignalPort(std::string name, Connect connection, uint32_t channel)
+	{
+		bool isOutput = connection == Connect::ToPlayback;
+
+		std::string portName = name + std::to_string(channel);
+		auto port = jack_port_register(m_jackClient, portName.c_str(), JACK_DEFAULT_AUDIO_TYPE, isOutput ? JackPortIsOutput : JackPortIsInput, 0);
+		if (port == NULL) {
+			throw std::runtime_error("Could not create port " + portName);
+		}
+
+
+		switch (connection) {
+		case Connect::ToCapture:
+			if (m_portsCapture[channel] != NULL) {
+				if (jack_connect(m_jackClient, m_portsCapture[channel], jack_port_name(port))) {
+					throw std::runtime_error("Cannot connect input port " + portName + " to capture");
+				}
+			}
+			break;
+
+		case Connect::ToPlaybackSource:
+
+			// find ports connected to physical playback ports and "hook in"
+			if (m_portsPlayback[channel] != NULL) {
+				const char **portsAudioSource = jack_port_get_all_connections(m_jackClient, jack_port_by_name(m_jackClient, m_portsPlayback[channel]));
+				if (!portsAudioSource || !portsAudioSource[0]) {
+					throw std::runtime_error("Playplack port " + std::string(m_portsPlayback[channel]) + " does not have any source.");
+				}
+
+				if (jack_connect(m_jackClient, portsAudioSource[0], jack_port_name(port))) {
+					throw std::runtime_error("Cannot connect input port to playback source!");
+				}
+			}
+
+			break;
+
+		case Connect::ToPlayback:
+			if (m_portsPlayback[channel] != NULL) {
+				if (jack_connect(m_jackClient, jack_port_name(port), m_portsPlayback[channel])) {
+					throw std::runtime_error("Cannot connect to playback port!");
+				}
+			}
+			break;
+		default: throw std::invalid_argument("Invalid port connection type.");
+		}
+
+
+		return port;
 	}
 
 	void AudioDriver::addSignal(SignalBuffer *buffer, std::vector<jack_port_t*> ports)
@@ -166,7 +185,7 @@ namespace autil {
 		if (ib == -1)
 			throw std::runtime_error("Signal buffer already added!");
 
-		bool isPlayback = jack_port_flags(ports[0]) & JackPortIsOutput;
+		bool isPlayback = (jack_port_flags(ports[0]) & JackPortIsOutput) == JackPortIsOutput;
 
 		for (uint32_t c = 0; c < buffer->channels; c++) {
 			auto con = getBufferPortConnection(ib, c);
@@ -177,6 +196,12 @@ namespace autil {
 
 
 		buffer->resetIterator();
+	}
+
+
+	void AudioDriver::addStreamer(SignalStreamer *streamer)
+	{
+		m_streamers.push_back(streamer);
 	}
 
 
@@ -209,7 +234,6 @@ namespace autil {
 			throw std::runtime_error("Tried to remove unknown SignalBufferObserver");
 		m_bufferPool[io] = nullptr;
 	}
-
 
 
 	jack_client_t * AudioDriver::initJack()
@@ -254,28 +278,6 @@ namespace autil {
 	}
 
 
-	std::vector<jack_port_t*> AudioDriver::newPorts(std::string baseName, int nChannels, bool outputNotInput)
-	{
-		std::vector<jack_port_t*> ports;
-		ports.reserve(nChannels);
-
-		std::string namePattern = baseName + "%d";
-
-		// Register ports
-		for (int c = 0; c < nChannels; c++)
-		{
-			char portName[100];
-			sprintf(portName, namePattern.c_str(), c);
-			ports.push_back(jack_port_register(m_jackClient, portName, JACK_DEFAULT_AUDIO_TYPE, outputNotInput ? JackPortIsOutput : JackPortIsInput, 0));
-			if (ports[c] == NULL) {
-				throw std::runtime_error("Could not create output port");
-			}
-		}
-
-		return ports;
-	}
-
-
 	int AudioDriver::jackProcess(jack_nframes_t nframes, void *arg)
 	{
 		AudioDriver *ad = (AudioDriver*)arg;
@@ -283,21 +285,25 @@ namespace autil {
 		if (!ad->m_running)
 			return 1;
 
-
 		if (ad->m_newActions) {
-			printf("AudioDriver: processing queue...\n");
+			//printf("AudioDriver: processing queue...\n");
 
 			while (ad->m_actionQueue.size()) {
 				try {
-					std::cout << "proc..." << std::endl;
+					//std::cout << "proc..." << std::endl;
 					ad->m_actionQueue.front()();
-					std::cout << "done!" << std::endl;
+					//std::cout << "done!" << std::endl;
 				}
-				catch (const std::string &ex) {
-					std::cout << "AudioDriver exception:" << ex << std::endl;
+				catch (const std::exception &ex) {
+					std::cout << "AudioDriver exception:" << ex.what() << std::endl;
 				}
 				ad->m_actionQueue.pop();
 			}
+
+
+			// remove cleared streamers
+			ad->m_streamers.erase(std::remove_if(ad->m_streamers.begin(), ad->m_streamers.end(),
+				[](SignalStreamer *s) { return !!s->func || (s->in == s->out); }), ad->m_streamers.end());
 
 			ad->m_newActions = false;
 			ad->m_evtActionQueueProcessed.Signal();
@@ -307,6 +313,7 @@ namespace autil {
 			return 0;
 
 
+		// signal buffers
 		for (int ib = 0; ib < MAX_SIGNAL_BUFFERS; ib++) {
 			SignalBuffer *signalBuffer = ad->m_buffers[ib];
 
@@ -321,6 +328,8 @@ namespace autil {
 
 				jack_default_audio_sample_t * block = (jack_default_audio_sample_t *)jack_port_get_buffer(con->port, nframes);
 
+				
+
 				if (block == NULL) {
 					continue;
 					//throw "Block is NULL!";
@@ -331,10 +340,11 @@ namespace autil {
 				}
 				else {
 					signalBuffer->addBlock(ic, block, nframes);
-				}
+				}				
 			}
 		}
 
+		// signal buffer observers
 		for (int ip = 0; ip < MAX_SIGNAL_BUFFERS; ip++) {
 			auto bufferPool = ad->m_bufferPool[ip];
 
@@ -354,6 +364,23 @@ namespace autil {
 		}
 
 
+		// stream processors
+		for (auto streamerPtr : ad->m_streamers) {
+			auto &streamer(*streamerPtr);
+
+			if (!streamer.func)
+				continue;			
+			float * blockIn = (streamer.in) ? (float *)jack_port_get_buffer(streamer.in, nframes) : nullptr;
+			float * blockOut= (streamer.out) ? (float *)jack_port_get_buffer(streamer.out, nframes) : nullptr;
+
+			if (!streamer.func(blockIn, blockOut, nframes)) {
+				streamer.func = nullptr;
+				streamer._end();
+				ad->m_newActions = true;
+			}
+		}
+
+
 		ad->m_totalFramesProcessed += nframes;
 
 		return 0;
@@ -364,6 +391,38 @@ namespace autil {
 		printf("Jack shutdown\n");
 		auto ad = (AudioDriver*)arg;
 		ad->m_running = false;
+	}
+
+	std::string getError(int rc) {
+		char errmsg[1024];
+#ifdef _WIN32
+		::strerror_s(errmsg, rc);
+#else
+		strerror_r(rc, errmsg, sizeof errmsg);
+#endif
+		return errmsg;
+	}
+
+	void AudioDriver::setBlockSize(int blockSize)
+	{
+		auto rc = jack_set_buffer_size(m_jackClient, blockSize);
+		if (rc)
+			throw std::runtime_error("jack_set_buffer_size(): " + getError(rc));
+		m_blockSize = jack_get_buffer_size(m_jackClient);
+	}
+
+
+	AudioDriver::Request &AudioDriver::Request::addStreamer(SignalStreamer *streamer, const std::string &name, Connect connection, int channel) {
+		if ((connection & Connect::ToCapture) == Connect::ToCapture) {
+			streamer->in = driver->createSignalPort(name + "-in", Connect::ToCapture, channel);
+		}
+
+		if (connection != Connect::ToCapture) {
+			streamer->out = driver->createSignalPort(name + "-out", ((connection & Connect::ToPlayback) == Connect::ToPlayback) ? Connect::ToPlayback : Connect::ToPlaybackSource, channel);
+		}
+
+		actions.push(std::bind(&AudioDriver::addStreamer, driver, streamer));
+		return *this;
 	}
 
 }
