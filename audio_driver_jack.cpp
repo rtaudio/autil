@@ -1,4 +1,4 @@
-#include "audio_driver.h"
+#include "audio_driver_jack.h"
 
 #include <vector>
 #include <fstream>
@@ -11,19 +11,12 @@
 #include "test.h"
 
 namespace autil {
-	AudioDriver::AudioDriver(const std::string &name) :
-		m_totalFramesProcessed(0),
-		m_running(false),
-		m_newActions(false),
-		m_paused(false),
-		m_name(name)
+    AudioDriverJack::AudioDriverJack(const std::string &name) : AudioDriverBase(name)
 	{
-		memset(m_buffers, 0, sizeof(m_buffers));
-		memset(m_bufferPool, 0, sizeof(m_bufferPool));
-
 		memset(m_bufferPortConnections, 0, sizeof(m_bufferPortConnections));
 		
 		m_jackClient = initJack();
+
 		m_sampleRate = jack_get_sample_rate(m_jackClient);
 		m_blockSize = jack_get_buffer_size(m_jackClient);
 
@@ -33,23 +26,13 @@ namespace autil {
 	}
 
 
-	AudioDriver::~AudioDriver()
+    AudioDriverJack::~AudioDriverJack()
 	{
-		m_running = false;
-		//jack_deactivate(m_jackClient);
 		jack_client_close(m_jackClient);
 	}
 
-	void AudioDriver::pauseAudioProcessing()
-	{
-		m_paused = true;
-		m_newActions = true;
-		m_evtActionQueueProcessed.Wait();
-	}
 
-
-
-	void AudioDriver::muteOthers(bool mute)
+    void AudioDriverJack::muteOthers(bool mute)
 	{
 		RttLocalLock ll(m_mtxActionQueue);
 
@@ -80,55 +63,9 @@ namespace autil {
 		commit(); // sync with driver
 	}
 
-	int uniquePtrArrayAdd(void **array, int len, void* ptr)
-	{
-		int iEmpty = 0;
-		for (int i = (len - 1); i >= 0; i--) {
-			if (array[i] == ptr)
-				return -1;
-			if (array[i] == NULL)
-				iEmpty = i;
-		}
-
-		array[iEmpty] = ptr;
-		return iEmpty;
-	}
-
-	int uniquePtrArrayIndexOf(void **array, int len, void* ptr)
-	{
-		for (int i = (len - 1); i >= 0; i--) {
-			if (array[i] == ptr)
-				return i;
-		}
-
-		return -1;
-	}
 
 
-
-	void AudioDriver::addObserver(SignalBufferObserver *pool)
-	{
-		uniquePtrArrayAdd((void**)m_bufferPool, MAX_SIGNAL_BUFFERS, pool);
-		pool->lastUpdate = -1;
-	}
-
-
-	std::vector<jack_port_t*> AudioDriver::createSignalPorts(SignalBuffer *buffer, const std::string &name, Connect connection)
-	{
-		bool isOutput = connection == Connect::ToPlayback;
-
-		std::vector<jack_port_t*> ports;
-		buffer->name = name;
-
-		for (uint32_t c = 0; c < buffer->channels; c++) {
-			ports.push_back(createSignalPort(name, connection, c));
-		}
-
-		return ports;
-	}
-
-
-	jack_port_t* AudioDriver::createSignalPort(std::string name, Connect connection, uint32_t channel)
+    void *AudioDriverJack::signalPortNew(Connect connection, uint32_t channel, const std::string &name )
 	{
 		bool isOutput = connection == Connect::ToPlayback;
 
@@ -175,65 +112,14 @@ namespace autil {
 		}
 
 
-		return port;
-	}
-
-	void AudioDriver::addSignal(SignalBuffer *buffer, std::vector<jack_port_t*> ports)
-	{
-		int ib = uniquePtrArrayAdd((void**)m_buffers, MAX_SIGNAL_BUFFERS, buffer);
-
-		if (ib == -1)
-			throw std::runtime_error("Signal buffer already added!");
-
-		bool isPlayback = (jack_port_flags(ports[0]) & JackPortIsOutput) == JackPortIsOutput;
-
-		for (uint32_t c = 0; c < buffer->channels; c++) {
-			auto con = getBufferPortConnection(ib, c);
-			con->isOutput = isPlayback;
-			con->port = ports[c];
-		}
-
-
-
-		buffer->resetIterator();
+        return static_cast<void*>(port);
 	}
 
 
-	void AudioDriver::addStreamer(SignalStreamer *streamer)
-	{
-		m_streamers.push_back(streamer);
-	}
 
 
-	void AudioDriver::removeSignal(SignalBuffer *buffer)
-	{
-		int ib = uniquePtrArrayIndexOf((void**)m_buffers, MAX_SIGNAL_BUFFERS, buffer);
-		if (ib < 0)
-			throw std::runtime_error("Tried to remove unknown SignalBuffer");
-
-		for (uint32_t c = 0; c < buffer->channels; c++) {
-			auto con = getBufferPortConnection(ib, c);
-			if (!con->port)
-				throw std::runtime_error("remove: Port = NULL!");
-
-			jack_port_unregister(m_jackClient, con->port);
-
-			con->port = nullptr;
-			con->isOutput = false;
-		}
-
-		m_buffers[ib] = nullptr;
-
-	}
 
 
-	void AudioDriver::removeObserver(SignalBufferObserver *observer)
-	{
-		int io = uniquePtrArrayIndexOf((void**)m_bufferPool, MAX_SIGNAL_BUFFERS, observer);
-		if (io < 0)
-			throw std::runtime_error("Tried to remove unknown SignalBufferObserver");
-		m_bufferPool[io] = nullptr;
-	}
 
 
 	jack_client_t * AudioDriver::initJack()
@@ -285,29 +171,7 @@ namespace autil {
 		if (!ad->m_running)
 			return 1;
 
-		if (ad->m_newActions) {
-			//printf("AudioDriver: processing queue...\n");
-
-			while (ad->m_actionQueue.size()) {
-				try {
-					//std::cout << "proc..." << std::endl;
-					ad->m_actionQueue.front()();
-					//std::cout << "done!" << std::endl;
-				}
-				catch (const std::exception &ex) {
-					std::cout << "AudioDriver exception:" << ex.what() << std::endl;
-				}
-				ad->m_actionQueue.pop();
-			}
-
-
-			// remove cleared streamers
-			ad->m_streamers.erase(std::remove_if(ad->m_streamers.begin(), ad->m_streamers.end(),
-				[](SignalStreamer *s) { return !!s->func || (s->in == s->out); }), ad->m_streamers.end());
-
-			ad->m_newActions = false;
-			ad->m_evtActionQueueProcessed.Signal();
-		}
+        processActionQueueInAudioThread();
 
 		if (ad->m_paused)
 			return 0;
@@ -344,26 +208,6 @@ namespace autil {
 			}
 		}
 
-		// signal buffer observers
-		for (int ip = 0; ip < MAX_SIGNAL_BUFFERS; ip++) {
-			auto bufferPool = ad->m_bufferPool[ip];
-
-			if (!bufferPool)
-				continue;
-
-			if (bufferPool->lastUpdate == -1)
-				bufferPool->lastUpdate = ad->m_totalFramesProcessed;
-
-			if (bufferPool->updateInterval >= 0 && (ad->m_totalFramesProcessed - bufferPool->lastUpdate) > bufferPool->updateInterval) {
-				bufferPool->lastUpdate = ad->m_totalFramesProcessed;
-				if (!bufferPool->commit()) {
-					printf("History comit failed! Update thread is too slow.\n");
-					bufferPool->lastUpdate += bufferPool->updateInterval; // add penalty time
-				}
-			}
-		}
-
-
 		// stream processors
 		for (auto streamerPtr : ad->m_streamers) {
 			auto &streamer(*streamerPtr);
@@ -380,8 +224,7 @@ namespace autil {
 			}
 		}
 
-
-		ad->m_totalFramesProcessed += nframes;
+        processSignalBufferObserverInAudioThread(nframes);
 
 		return 0;
 	}
@@ -412,6 +255,7 @@ namespace autil {
 	}
 
 
+    /*
 	AudioDriver::Request &AudioDriver::Request::addStreamer(SignalStreamer *streamer, const std::string &name, Connect connection, int channel) {
 		if ((connection & Connect::ToCapture) == Connect::ToCapture) {
 			streamer->in = driver->createSignalPort(name + "-in", Connect::ToCapture, channel);
@@ -424,5 +268,6 @@ namespace autil {
 		actions.push(std::bind(&AudioDriver::addStreamer, driver, streamer));
 		return *this;
 	}
+    */
 
 }

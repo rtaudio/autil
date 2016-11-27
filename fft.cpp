@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <limits>
+#include <math.h>
 
 namespace autil {
 	std::unordered_map<int, fft::plan> fft::plans;
@@ -85,7 +86,7 @@ namespace autil {
 		auto n = vector.size();
 		std::vector<float> res(n);
 		for (size_t i = 0; i < n; i++) {
-			res[i] = sqrtf(vector[i].im * vector[i].im + vector[i].re * vector[i].re);
+            res[i] = sqrtf(vector[i].im * vector[i].im + vector[i].re * vector[i].re);
 		}
 		return res;
 	}

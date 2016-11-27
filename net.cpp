@@ -45,7 +45,7 @@ namespace autil {
 			throw ("Could not set send buffer size!");
 		}
 
-		soc = (void*)s;
+        soc = s;
 
 
 		sa = new struct sockaddr_in();

@@ -14,7 +14,7 @@ namespace autil {
 
 class UdpSocket {
 private:
-	void *soc;
+    int soc;
 	struct sockaddr_in *sa;
 	short blockIndex_;
 public:
