@@ -26,8 +26,9 @@ int throwIfError(int err, const std::string &msg) {
 }
 
 int
-configure_alsa_audio(snd_pcm_t *device, int channels, int buffer_size, int sample_rate)
+configure_alsa_audio(snd_pcm_t *device, int channels, int &buffer_size, int sample_rate)
 {
+    std::cout << "config alsa device C=" << channels << " bs=" << buffer_size << " sr=" << sample_rate << std::endl;
     snd_pcm_hw_params_t *hw_params;
     int                 err;
     unsigned int                 tmp;
@@ -50,7 +51,7 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int buffer_size, int sampl
 
     // bits = 16
     throwIfError(snd_pcm_hw_params_set_format(device, hw_params, SND_PCM_FORMAT_S16_LE),
-                 "cannot set sample format");
+                 "cannot set sample format SND_PCM_FORMAT_S16_LE");
 
     // snd_pcm_hw_params_set_rate_resample: allow resampling
 
@@ -80,11 +81,8 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int buffer_size, int sampl
            buffer_size = frames * frame_size / fragments;
        }
 
-       if ((err = snd_pcm_hw_params(device, hw_params)) < 0) {
-           fprintf(stderr, "Error setting HW params: %s\n",
-                   snd_strerror(err));
-           return 1;
-       }
+	   throwIfError(snd_pcm_hw_params(device, hw_params), "Error setting HW params");
+        
        return 0;
    }
 
@@ -107,30 +105,55 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int buffer_size, int sampl
 		m_running = true;
 
         m_audioThread = new RttThread([this]() {
+			std::cout << "audioThread started!" << std::endl;
             process();
-        }, true);
+        }, true, "audio");
 	}
 
     AudioDriverAlsa::~AudioDriverAlsa()
     {
+		m_running = false;
+		std::cout << "close audio" << std::endl;
         delete m_audioThread;
 
         if(playback_handle)
             snd_pcm_close(playback_handle);
         if(capture_handle)
             snd_pcm_close(capture_handle);
+
+		playback_handle = nullptr;
+		capture_handle = nullptr;
     }
 
     void AudioDriverAlsa::setBlockSize(int blockSize) {
         m_blockSize = blockSize;
-        if(playback_handle)
-            configure_alsa_audio(playback_handle, m_numChannelsPlayback, m_blockSize, m_sampleRate);
-        if(capture_handle)
-            configure_alsa_audio(capture_handle, m_numChannelsCapture, m_blockSize, m_sampleRate);
+
+        sync();
+        m_actionQueue.push([this]() {
+			if (playback_handle)
+				configure_alsa_audio(playback_handle, m_numChannelsPlayback, m_blockSize, m_sampleRate);
+			if (capture_handle)
+				configure_alsa_audio(capture_handle, m_numChannelsCapture, m_blockSize, m_sampleRate);
+		});
+        commit();
     }
 
 
+	void float2short(uint8_t *out, size_t stride, const float *in, size_t n)
+	{
+		stride = stride * sizeof(uint8_t) / sizeof(int16_t);
+		for(size_t i = 0; i < n; i++) {
+			reinterpret_cast<int16_t*>(out)[i*stride] = lrintf(in[i] * 32767.0f);
+		}
+	}
 
+	void short2float(float *out, const uint8_t *in, size_t stride, size_t n) {
+		const float scaling = 1.0f / 32767.0f;
+		stride = stride * sizeof(uint8_t) / sizeof(int16_t);
+		for (size_t i = 0; i < n; i++) {
+			out[i] = reinterpret_cast<const int16_t*>(in)[i*stride] * scaling;
+		}
+	}
 
 
     void AudioDriverAlsa::process()
@@ -143,7 +166,7 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int buffer_size, int sampl
 
         int             blockSize, inframes, outframes, frame_size;
         bool restarting = true;
-        std::vector<float> pcmIn, pcmOut;
+        std::vector<int16_t> pcmIn, pcmOut;
 
         const unsigned int                 fragments = 2;
 
@@ -178,23 +201,35 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int buffer_size, int sampl
             auto pcmOutPtr = pcmOut.data();
 
             // read capture data
-            while ((inframes = snd_pcm_readi(capture_handle, pcmInPtr, blockSize)) < 0) {
-                if (inframes == -EAGAIN)
-                    continue;
+			auto avail = snd_pcm_avail_update(capture_handle);
+			if (avail > 0 || true) {
+				while ((inframes = snd_pcm_readi(capture_handle, pcmInPtr, blockSize)) < 0) {
+					if (inframes == -EAGAIN)
+						continue;
+					std::cerr << "overrun " << m_numOverruns << std::endl;
+					m_numOverruns++;
+					restarting = true;
+					snd_pcm_prepare(capture_handle);
+				}
+			
 
-                m_numOverruns++;
-                restarting = true;
-                snd_pcm_prepare(capture_handle);
-            }
+				if (inframes != blockSize) {
+					m_numShortReads++;
+					fprintf(stderr, "Short read from capture device: %d, expecting %d\n", inframes, blockSize);
+					// todo: zero set buffer at [inframes...blockSize]
+				}
+			}
+			/**/
 
-            if (inframes != blockSize) {
-                m_numShortReads++;
-                fprintf(stderr, "Short read from capture device: %d, expecting %d\n", inframes, blockSize);
-                // todo: zero set buffer at [inframes...blockSize]
-            }
-
+			// Vector processing: http://stackoverflow.com/questions/16031149/speedup-a-short-to-float-cast
+			// in JACK look for write_via_copy
+			// TODO: vector optimiazation
 
             // signal buffers
+
+			// stride (byte-unit)
+			size_t stride = sizeof(int16_t) * m_numChannelsPlayback;
+
             for (int ib = 0; ib < MAX_SIGNAL_BUFFERS; ib++) {
                 SignalBuffer *signalBuffer = m_buffers[ib];
 
@@ -204,23 +239,32 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int buffer_size, int sampl
                 for (uint32_t ic = 0; ic < signalBuffer->channels; ic++) {
                     auto con = getBufferPortConnection(ib, ic);
 
-                    // NON-interleaved RW of PCM data (c0c0c0... c1c1c1c1... cNcNcNcN)
+                    // interleaved RW of PCM data (c0c1c2c0c1c3 ...)
                     if (con->isOutput) {
-                        signalBuffer->getBlock(ic, pcmOutPtr + (ic * blockSize), blockSize);
+                        signalBuffer->getBlock(ic, reinterpret_cast<uint8_t*>(pcmOutPtr + ic), stride, blockSize, &float2short);
                     } else {
-                        signalBuffer->addBlock(ic, pcmInPtr + (ic * blockSize), blockSize);
+                        signalBuffer->addBlock(ic, reinterpret_cast<uint8_t*>(pcmInPtr + ic), stride, blockSize, &short2float);
                     }
                 }
             }
+
+			//for (int ii = 0; ii < blockSize; ii++) {
+				//(pcmOutPtr)[0 + (ii*m_numChannelsPlayback)] = (rand() % (32760 * 2)) - 3276;
+			//}
 
 
             // write playback data
             while ((outframes = snd_pcm_writei(playback_handle, pcmOutPtr, blockSize)) < 0) {
                 if (outframes == -EAGAIN)
                     continue;
+				if(m_numUnderruns % 100000 == 0)
+					std::cerr << "underrun " << m_numUnderruns << std::endl;
                 m_numUnderruns++;
-                restarting = true;
-                snd_pcm_prepare(playback_handle);
+                //restarting = true;
+                //snd_pcm_prepare(playback_handle);
+
+				//for (int i = 0; i < fragments; i += 1)
+				//	snd_pcm_writei(playback_handle, pcmOut.data(), blockSize);
             }
             if (outframes != blockSize){
                 m_numShortWrites++;

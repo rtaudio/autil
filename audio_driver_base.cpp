@@ -48,10 +48,8 @@ void AudioDriverBase::removeSignal(SignalBuffer *buffer)
 
     for (uint32_t c = 0; c < buffer->channels; c++) {
         auto con = getBufferPortConnection(ib, c);
-        if (!con->port)
-            throw std::runtime_error("remove: Port = NULL!");
-
-        signalPortDestroy(con->port);
+        if (con->port)      
+			signalPortDestroy(con->port);
 
         con->port = nullptr;
         con->isOutput = false;

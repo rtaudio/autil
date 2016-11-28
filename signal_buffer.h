@@ -3,6 +3,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 #include<rtt/rtt.h>
 
@@ -130,27 +131,74 @@ public:
 
 		if (breakBlock) {
 			// wrap around: need to copy in two ops
-			memcpy(&getPtrTQ(channel)[m_timeQueuePointer], block, untilEnd*sizeof(float));
-			memcpy(&getPtrTQ(channel)[0], block + untilEnd, (length - untilEnd)*sizeof(float));
+			memcpy(&getPtrTQ(channel)[m_timeQueuePointer], block, untilEnd * sizeof(float));
+			memcpy(&getPtrTQ(channel)[0], block + untilEnd, (length - untilEnd) * sizeof(float));
 			if (!m_preProcessors.empty()) {
 				throw "Unsupported setup: stream preprocess can only be used with signal buffers having a multiple block size length!";
 			}
 
 		}
 		else {
-			memcpy(&getPtrTQ(channel)[m_timeQueuePointer], block, length*sizeof(float));
+			memcpy(&getPtrTQ(channel)[m_timeQueuePointer], block, length * sizeof(float));
 			if (!m_preProcessors.empty()) {
 				uint32_t prev = (m_timeQueuePointer + (size - length)) % size;
-				if((size - prev) < length)
+				if ((size - prev) < length)
 					throw "Unsupported setup: stream preprocess can only be used with signal buffers having a multiple block size length!";
 				else
 					m_preProcessors[channel]->Process(getPtrTQ(channel, m_timeQueuePointer), length);
-					//m_streamPreprocessor->Process(getPtrTQ(channel, prev), getPtrTQ(channel, m_timeQueuePointer), , length);
+				//m_streamPreprocessor->Process(getPtrTQ(channel, prev), getPtrTQ(channel, m_timeQueuePointer), , length);
 			}
-			
+
 		}
 
-		
+
+		// inc pointer with last channel
+		if (channel == channels - 1) {
+#ifdef WITH_DEBUG_NET
+			if (debugSocket && !breakBlock) {
+				sendDebugBlock(m_timeQueuePointer, length);
+			}
+#endif
+
+			m_timeQueuePointer += length;
+			m_timeQueuePointer = m_timeQueuePointer % (size + delay);
+		}
+	}
+
+
+	void addBlock(uint32_t channel, const uint8_t *srcBlock, const uint32_t srcStride, uint32_t length, void(*converter)(float *out, const uint8_t *in, size_t outStride, size_t n)) {
+		if (channel >= channels)
+			throw std::out_of_range("Invalid channel number!");
+
+		if (length > size || length == 0)
+			throw std::out_of_range("Invalid block size!");
+
+		uint32_t untilEnd = size + delay - m_timeQueuePointer;
+		bool breakBlock = (length > untilEnd);
+
+		if (breakBlock) {
+			// wrap around: need to copy in two ops
+			converter(&getPtrTQ(channel)[m_timeQueuePointer], srcBlock, srcStride, untilEnd );
+			converter(&getPtrTQ(channel)[0], srcBlock + untilEnd, srcStride, (length - untilEnd));
+			if (!m_preProcessors.empty()) {
+				throw "Unsupported setup: stream preprocess can only be used with signal buffers having a multiple block size length!";
+			}
+
+		}
+		else {
+			converter(&getPtrTQ(channel)[m_timeQueuePointer], srcBlock, srcStride, length);
+			if (!m_preProcessors.empty()) {
+				uint32_t prev = (m_timeQueuePointer + (size - length)) % size;
+				if ((size - prev) < length)
+					throw "Unsupported setup: stream preprocess can only be used with signal buffers having a multiple block size length!";
+				else
+					m_preProcessors[channel]->Process(getPtrTQ(channel, m_timeQueuePointer), length);
+				//m_streamPreprocessor->Process(getPtrTQ(channel, prev), getPtrTQ(channel, m_timeQueuePointer), , length);
+			}
+
+		}
+
+
 		// inc pointer with last channel
 		if (channel == channels - 1) {
 #ifdef WITH_DEBUG_NET
@@ -176,11 +224,11 @@ public:
 
 		if (length > untilEnd) {
 			// wrap around: need to copy in two ops
-			memcpy(block, &getPtrTQ(channel)[m_timeQueuePointer], untilEnd*sizeof(float));
-			memcpy(block + untilEnd, &getPtrTQ(channel)[0], (length - untilEnd)*sizeof(float));
+			memcpy(block, &getPtrTQ(channel)[m_timeQueuePointer], untilEnd * sizeof(float));
+			memcpy(block + untilEnd, &getPtrTQ(channel)[0], (length - untilEnd) * sizeof(float));
 		}
 		else {
-			memcpy(block, &getPtrTQ(channel)[m_timeQueuePointer], length*sizeof(float));
+			memcpy(block, &getPtrTQ(channel)[m_timeQueuePointer], length * sizeof(float));
 		}
 
 		if (channel == channels - 1) {
@@ -188,6 +236,32 @@ public:
 			m_timeQueuePointer = m_timeQueuePointer % size;
 		}
 	}
+
+	void getBlock(uint32_t channel, uint8_t *dstBlock, const uint32_t dstStride, uint32_t length, void (*converter)(uint8_t *out, size_t outStride, const float *in, size_t n)) {
+		if (channel >= channels)
+			throw "Invalid channel number!";
+
+		if (length > size || length == 0)
+			throw "Invalid block size!";
+
+		uint32_t untilEnd = size - m_timeQueuePointer;
+
+
+		if (length > untilEnd) {
+			// wrap around: need to copy in two ops
+			converter(dstBlock, dstStride, &getPtrTQ(channel)[m_timeQueuePointer], untilEnd);
+			converter(dstBlock + (untilEnd*dstStride), dstStride, &getPtrTQ(channel)[0], (length - untilEnd));
+		}
+		else {
+			converter(dstBlock, dstStride, &getPtrTQ(channel)[m_timeQueuePointer], length);
+		}
+
+		if (channel == channels - 1) {
+			m_timeQueuePointer += length;
+			m_timeQueuePointer = m_timeQueuePointer % size;
+		}
+	}
+
 
 	void stage() {
 		if (!m_timeStage)

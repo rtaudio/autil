@@ -85,6 +85,8 @@ namespace autil {
 			void execute() {
 				RttLocalLock ll(driver->m_mtxActionQueue);
 
+				driver->sync();
+
 				while (actions.size()) {
 					driver->m_actionQueue.push(actions.front());
 					actions.pop();
@@ -102,6 +104,9 @@ namespace autil {
 
 			void undo() {
 				RttLocalLock ll(driver->m_mtxActionQueue);
+
+				driver->sync();
+
 				while (undoActions.size()) {
 					driver->m_actionQueue.push(undoActions.front());
 					undoActions.pop();
@@ -148,13 +153,17 @@ namespace autil {
 		void removeObserver(SignalBufferObserver *buffer);
 //		void removeStreamer(SignalStreamer &buffer);
 
-		inline void commit(bool async = false) {
-			while (m_newActions) {
+		inline void sync() {
+            while (m_newActions && m_running) {
 				m_evtActionQueueProcessed.Wait(m_blockSize * 2000 / m_sampleRate);
 			}
 			m_evtActionQueueProcessed.Reset();
+		}
+		
+		inline void commit(bool async = false) {
+			sync();
 			m_newActions = true;
-			if (!async) {
+            if (!async && m_running) {
 				m_evtActionQueueProcessed.Wait();
 			}
 		}

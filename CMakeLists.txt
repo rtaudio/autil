@@ -34,3 +34,6 @@ find_library(FFTW3F_LIB NAMES fftw3f )
 
 target_link_libraries (autil ${DRIVER_LIBS} ${SNDFILE_LIB} ${FFTW3F_LIB})
 target_include_directories (autil PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${DRIVER_INCS} ../)
+
+#debug
+add_definitions("-g -ggdb")

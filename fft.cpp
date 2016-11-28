@@ -4,6 +4,7 @@
 #include <vector>
 #include <limits>
 #include <math.h>
+#include <stdexcept>
 
 namespace autil {
 	std::unordered_map<int, fft::plan> fft::plans;

@@ -115,7 +115,7 @@ namespace autil {
 
 		for (auto s : samples) {
 			if (s->size() != blockSize)
-				throw std::invalid_argument("Channels must have equal length!");
+				throw std::invalid_argument("Channels must have equal length! (" + std::to_string(s->size()) + " vs " + std::to_string(blockSize) + ")");
 			ps.push_back(s->data());
 		}
 		return sendBlock(ps, blockSize, blockIndex_++);
