@@ -38,8 +38,9 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int &buffer_size, int samp
     // TODO: free!
 
     /* allocate memory for hardware parameter structure */
-    throwIfError(snd_pcm_hw_params_malloc(&hw_params),
-                 "cannot allocate parameter structure");
+	throwIfError(snd_pcm_hw_params_malloc(&hw_params),
+		"cannot allocate parameter structure");
+
 
     /* fill structure from current audio parameters */
     throwIfError(snd_pcm_hw_params_any(device, hw_params),
@@ -53,7 +54,9 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int &buffer_size, int samp
     throwIfError(snd_pcm_hw_params_set_format(device, hw_params, SND_PCM_FORMAT_S16_LE),
                  "cannot set sample format SND_PCM_FORMAT_S16_LE");
 
-    // snd_pcm_hw_params_set_rate_resample: allow resampling
+	int resample = 1;
+	throwIfError(snd_pcm_hw_params_set_rate_resample(device, hw_params, resample),
+		"cannot setup resample");
 
     tmp = sample_rate;
     throwIfError(snd_pcm_hw_params_set_rate_near(device, hw_params, &tmp, 0),
@@ -67,7 +70,7 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int &buffer_size, int samp
     throwIfError(snd_pcm_hw_params_set_channels(device, hw_params, channels),
             "cannot set channel count");
 
-    throwIfError(snd_pcm_hw_params_set_periods_near(device, hw_params, &fragments, 0),
+    throwIfError(snd_pcm_hw_params_set_periods(device, hw_params, fragments, 0),
                  "Error setting # fragments to " + std::to_string(fragments)
                   );
 
@@ -90,10 +93,15 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int &buffer_size, int samp
     AudioDriverAlsa::AudioDriverAlsa(const std::string &deviceName, const StreamProperties &props)
         : AudioDriverBase(deviceName)
 	{
-        throwIfError(snd_pcm_open(&playback_handle, deviceName.c_str(), SND_PCM_STREAM_PLAYBACK, 0),
+		const bool block = false;
+
+		capture_handle = nullptr;
+		playback_handle = nullptr;
+
+        throwIfError(snd_pcm_open(&playback_handle, deviceName.c_str(), SND_PCM_STREAM_PLAYBACK, block ? 0 : SND_PCM_NONBLOCK),
                      "cannot open output audio device "+deviceName);
 
-         throwIfError(snd_pcm_open(&capture_handle, deviceName.c_str(), SND_PCM_STREAM_CAPTURE, 0),
+         throwIfError(snd_pcm_open(&capture_handle, deviceName.c_str(), SND_PCM_STREAM_CAPTURE, block ? 0 : SND_PCM_NONBLOCK),
                  "cannot open input audio device "+deviceName);
 
          m_sampleRate = props.sampleRate;
@@ -155,26 +163,120 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int &buffer_size, int samp
 		}
 	}
 
+	/*
+	long readbuf(snd_pcm_t *handle, char *buf, long len, size_t *frames, size_t *max)
+	{
+		const bool block = false;
+
+		long r;
+
+		if (!block) {
+			do {
+				r = snd_pcm_readi(handle, buf, len);
+			} while (r == -EAGAIN);
+			if (r > 0) {
+				*frames += r;
+				if ((long)*max < r)
+					*max = r;
+			}
+			// printf("read = %li\n", r);
+		}
+		else {
+			int frame_bytes = (snd_pcm_format_width(format) / 8) * channels;
+			do {
+				r = snd_pcm_readi(handle, buf, len);
+				if (r > 0) {
+					buf += r * frame_bytes;
+					len -= r;
+					*frames += r;
+					if ((long)*max < r)
+						*max = r;
+				}
+				// printf("r = %li, len = %li\n", r, len);
+			} while (r >= 1 && len > 0);
+		}
+		// showstat(handle, 0);
+		return r;
+	}
+	*/
+
+	void writebuf(snd_pcm_t *handle, char *buf, size_t bufStride, long len, size_t *frames)
+	{
+		long r;
+
+		while (len > 0) {
+			r = snd_pcm_writei(handle, buf, len);
+			if (r == -EAGAIN)
+				continue;
+			throwIfError(r, "write error");
+			buf += r * bufStride;
+			len -= r;
+			*frames += r;
+		}
+	}
 
     void AudioDriverAlsa::process()
     {
+		const unsigned int                 fragments = 2;
+		int blockSize = m_blockSize;
+
         m_numShortWrites = 0;
         m_numUnderruns = 0;
         m_numShortReads = 0;
         m_numOverruns = 0;
 
+		size_t framesOut = 0;
+		size_t framesIn = 0;
+		size_t maxInLatency = 0;
 
-        int             blockSize, inframes, outframes, frame_size;
-        bool restarting = true;
-        std::vector<int16_t> pcmIn, pcmOut;
+		const size_t bytesPerSample = 2;
 
-        const unsigned int                 fragments = 2;
+		// create buffers
+		std::vector<int16_t> pcmIn, pcmOut;
+		pcmIn.resize(m_numChannelsCapture * blockSize);
+		pcmOut.resize(m_numChannelsPlayback * blockSize);
+		auto pcmInPtr = pcmIn.data();
+		auto pcmOutPtr = pcmOut.data();
+
+		
+		throwIfError(snd_pcm_prepare(playback_handle), "failed to prepare playback stream");
+		throwIfError(snd_pcm_prepare(capture_handle), "failed to prepare capture stream");
+
+
+		if (capture_handle && playback_handle) {
+			throwIfError(snd_pcm_link(capture_handle, playback_handle),
+				"streams link error");
+		}
+
+		// pre-fill playback buffer
+		if (playback_handle) {
+			for (int i = 0; i < fragments; i++) {
+				writebuf(playback_handle, (char*)pcmOutPtr, bytesPerSample*m_numChannelsPlayback, blockSize, &framesOut);
+			}
+		}
+
+		throwIfError(snd_pcm_start(capture_handle ? capture_handle : playback_handle),
+			"start error");
+
+
+        int           inframes, outframes, frame_size;
+        bool restarting = false;
+        
+
+       
 
         while (m_running) {
             processActionQueueInAudioThread();
 
             if (restarting) {
                 restarting = false;
+
+				/*
+				snd_pcm_drop(chandle);
+                snd_pcm_nonblock(phandle, 0);
+                snd_pcm_drain(phandle);
+                snd_pcm_nonblock(phandle, !block ? 1 : 0);
+				*/
 
                 //frame_size = channels * (bits / 8);
                 //numFrames = buffer_size / frame_size;
@@ -197,8 +299,7 @@ configure_alsa_audio(snd_pcm_t *device, int channels, int &buffer_size, int samp
                     snd_pcm_writei(playback_handle, pcmOut.data(), blockSize);
             }
 
-            auto pcmInPtr = pcmIn.data();
-            auto pcmOutPtr = pcmOut.data();
+           
 
             // read capture data
 			auto avail = snd_pcm_avail_update(capture_handle);
