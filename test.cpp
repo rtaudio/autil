@@ -53,10 +53,10 @@ namespace autil {
 		Rw = Rz = iseed;
 	}
 
-	void test::generateSweep(float *buf, int len) {
+	void test::generateSweep(float *buf, int len, int samplingRate) {
 		const float bw = 2.0f / 12.0f;
 		const float fMin = 5.0f, fMax = 20000.0f;
-		const float sr = 44100;
+		const float sr = samplingRate;
 
 		// 10% stop margin
 		int lenSweep = len - len/10;

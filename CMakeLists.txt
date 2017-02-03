@@ -26,13 +26,12 @@ if( WITH_JACK AND EXISTS ${JACK_LIB} )
     list(APPEND DRIVER_INCS, ${JACK_INC})
 endif()
 
-add_library (autil  ${DRIVER_SRCS} signal_buffer.cpp signal_processor.cpp test.cpp file_io.cpp fft.cpp logging.cpp net.cpp)
+add_library (autil  ${DRIVER_SRCS} signal_buffer.cpp signal_processor.cpp test.cpp file_io.cpp logging.cpp net.cpp)
 
 
 find_library(SNDFILE_LIB NAMES sndfile )
-find_library(FFTW3F_LIB NAMES fftw3f libfftw3f libfftw3f.so.3 PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu )
 
-target_link_libraries (autil ${DRIVER_LIBS} ${SNDFILE_LIB} ${FFTW3F_LIB})
+target_link_libraries (autil ${DRIVER_LIBS} ${SNDFILE_LIB})
 target_include_directories (autil PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${DRIVER_INCS} ../)
 
 #debug

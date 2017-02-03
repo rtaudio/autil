@@ -8,9 +8,14 @@ classdef SignalBufferReceiver
     end
     methods
         function obj = SignalBufferReceiver(portNums, bufSize)
-            if nargin < 2 || ~isnumeric(portNums) || ~isnumeric(bufSize)
+            if nargin < 2
+                bufSize = 2^11;
+            end
+            
+            if nargin < 1 || ~isnumeric(portNums) || ~isnumeric(bufSize)
                 error('Need to pass port number(s) and buffer size to contructor');
             end
+            
             obj.bufSize = bufSize;
             obj.hudprs = cell(length(portNums),1);
             for pi = 1:length(portNums)
@@ -36,7 +41,7 @@ classdef SignalBufferReceiver
             bi = bi + 32767;
             
             
-            if bi ~= obj.prevBlockIndex + 1
+            if bi ~= obj.prevBlockIndex + 1 && obj.prevBlockIndex ~= -1
                 fprintf('lost blocks (got %d, expected %d)\n', bi, obj.prevBlockIndex);
                 obj.prevBlockIndex = bi -1;
             end
@@ -44,9 +49,12 @@ classdef SignalBufferReceiver
             timeStampOut = obj.prevBlockIndex*size(blockData,1);
             %numchannels = size(blockData,2);
             
-            obj.timeBuffer = [obj.timeBuffer((size(blockData,1)+1):end,:); blockData];
-            
-            timeDataOut = obj.timeBuffer;
+            if size(obj.timeBuffer,1) > size(blockData,1) 
+                obj.timeBuffer = [obj.timeBuffer((size(blockData,1)+1):end,:); blockData];
+                timeDataOut = obj.timeBuffer;
+            else
+                timeDataOut = blockData;
+            end        
         end
         
         
@@ -57,8 +65,12 @@ classdef SignalBufferReceiver
             blockIndexOut = -1;
             numPorts = length(obj.hudprs);
             
+            for pi = portsToRead
+                fprintf('waiting for data on port %d\n', obj.hudprs{pi}.LocalIPPort);
+            end
             
             while ~isempty(portsToRead) > 0
+                pause(0.001);
                 for pi = portsToRead
                     dataReceived = step(obj.hudprs{pi});
                     if isempty(dataReceived)

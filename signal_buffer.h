@@ -451,10 +451,16 @@ public:
 
 		// why would we need to reset the it?
 		//for (auto h : m_hists) {
-//			h->resetIterator();
+		//			h->resetIterator();
 		//}
 
 		commiting = false;
+	}
+
+	void resetBuffers() {
+		for (auto h : m_hists) {
+			h->resetIterator();
+		}
 	}
 	
 	void cancel() {

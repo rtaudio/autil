@@ -6,6 +6,7 @@
 #include <string.h>
 #include <iostream>
 #include <exception>
+#include <chrono>
 
 #include "signal_buffer.h"
 
@@ -16,19 +17,17 @@ namespace autil {
 /* we dont use MMAP, see
  * http://stackoverflow.com/questions/14762103/recording-from-alsa-understanding-memory-mapping
  */
-
+ /* 192khz @ 16 => 150sd => 0.78ms*/
+ /* 96khz @ 32 => 175sd => 1.82ms*/
 	snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
-	int rate = 48000;
+	int rate = 96000;
 	int channels = 2;
 	int buffer_size = 0;		/* auto */
 	int period_size = 0;		/* auto */
 	int latency_min = 32; //32;		/* in frames / 2 */
 	int latency_max = 2048;		/* in frames / 2 */
 	int block = 0;			/* block mode */
-	int use_poll = 1; // 1=energy saving
 	int resample = 1;
-	unsigned long loop_limit;
-
 
 	int setparams_stream(snd_pcm_t *handle,
 		snd_pcm_hw_params_t *params,
@@ -72,6 +71,7 @@ namespace autil {
 			printf("Rate doesn't match (requested %iHz, get %iHz)\n", rate, err);
 			return -EINVAL;
 		}
+		std::cout << "Sampling rate:" << rrate << std::endl;
 		return 0;
 	}
 
@@ -316,6 +316,8 @@ int throwIfError(int err, const std::string &msg) {
 	{
 		capture_handle = nullptr;
 		playback_handle = nullptr;
+		
+		m_poll = false;
 
         throwIfError(snd_pcm_open(&playback_handle, deviceName.c_str(), SND_PCM_STREAM_PLAYBACK, block ? 0 : SND_PCM_NONBLOCK),
                      "cannot open output audio device "+deviceName);
@@ -323,7 +325,7 @@ int throwIfError(int err, const std::string &msg) {
          throwIfError(snd_pcm_open(&capture_handle, deviceName.c_str(), SND_PCM_STREAM_CAPTURE, block ? 0 : SND_PCM_NONBLOCK),
                  "cannot open input audio device "+deviceName);
 
-         m_sampleRate = props.sampleRate;
+         rate = m_sampleRate = props.sampleRate;
          m_numChannelsCapture = props.numChannelsCapture;
          m_numChannelsPlayback = props.numChannelsPlayback;
         //setBlockSize(props.blockSize);
@@ -399,22 +401,12 @@ int throwIfError(int err, const std::string &msg) {
 
     void AudioDriverAlsa::process()
     {
-		const unsigned int                 fragments = 2;
-		  snd_timestamp_t p_tstamp, c_tstamp;
+		
 		  
 		int blockSize = m_blockSize;
 		int blockSizeMax = latency_max;
 		
-        m_numShortWrites = 0;
-        m_numUnderruns = 0;
-        m_numShortReads = 0;
-        m_numOverruns = 0;
-
-		size_t frames_in, frames_out;
-		size_t maxInLatency = 0;
-		
-
-		const size_t bytesPerSample = 2;
+		state.reset();
 
 		// create buffers
 		std::vector<int16_t> pcmIn, pcmOut;
@@ -422,72 +414,82 @@ int throwIfError(int err, const std::string &msg) {
 		pcmIn.resize(m_numChannelsCapture * blockSizeMax);
 		pcmOut.resize(m_numChannelsPlayback * blockSizeMax);
 		auto pcmInPtr = pcmIn.data();
-		auto pcmOutPtr = pcmOut.data();
-		
+		auto pcmOutPtr = pcmOut.data();		
 		auto pcmInBufferPtr = (char*)pcmIn.data();
 		auto pcmOutBufferPtr = (char*)pcmOut.data();
 
 
-		auto phandle = playback_handle;
-		auto chandle = capture_handle;
 		
 		int latency = latency_min - 4;
 		int err;
-		
+		snd_pcm_sframes_t delay;
+
+		state.tStarted = std::chrono::high_resolution_clock::now();
+
 		// XRun-restart loop
 		while (m_running) {
-                frames_in = frames_out = 0;
-                if (setparams(phandle, chandle, &latency) < 0)
-                        break;
-                //showlatency(latency);
-				
-				std::cout << "Block Size:" << latency << std::endl;
-                if ((err = snd_pcm_link(chandle, phandle)) < 0) {
-                        printf("Streams link error: %s\n", snd_strerror(err));
-                        exit(0);
-                }
-                if (snd_pcm_format_set_silence(format, pcmOutBufferPtr, latency*channels) < 0) {
-                        fprintf(stderr, "silence error\n");
-                        break;
-                }
-				
-				               if (snd_pcm_format_set_silence(format, pcmInBufferPtr, latency*channels) < 0) {
-                        fprintf(stderr, "silence error\n");
-                        break;
-                }
-				
-                if (writebuf(phandle, pcmOutBufferPtr, latency, &frames_out) < 0) {
-                        fprintf(stderr, "write error\n");
-                        break;
-                }
-                if (writebuf(phandle, pcmOutBufferPtr, latency, &frames_out) < 0) {
-                        fprintf(stderr, "write error\n");
-                        break;
-                }
-                if ((err = snd_pcm_start(chandle)) < 0) {
-                        printf("Go error: %s\n", snd_strerror(err));
-                        exit(0);
-                }
-                gettimestamp(phandle, &p_tstamp);
-                gettimestamp(chandle, &c_tstamp);
+			state.restart = false;
+			std::chrono::duration<double, std::milli> passedMs = std::chrono::high_resolution_clock::now() - state.tStarted;
 
-				bool hwSync = (p_tstamp.tv_sec == c_tstamp.tv_sec &&
-                    p_tstamp.tv_usec == c_tstamp.tv_usec);
+
+			// ignore xruns first 8 seconds to let the CPU exit from power saving state
+			if (passedMs.count() < 6000.0) {
+				latency = latency_min - 4;
+				// reset buffer observers on XRUN
+				for (int ip = 0; ip < MAX_SIGNAL_BUFFERS; ip++) {
+					auto bufferPool = m_bufferPool[ip];
+
+					if (bufferPool)
+						bufferPool->resetBuffers();
+				}
+			}
+			else {
+				state.show();
+			}
+			
+                if (setparams(playback_handle, capture_handle, &latency) < 0)
+                        break;
+				m_sampleRate = rate;
+
+                //showlatency(latency);				
+				std::cout << "Block Size:" << latency << std::endl;
+				
+                throwIfError(snd_pcm_link(capture_handle, playback_handle), "streams link error");	
+				
+				// 0-set frames
+                throwIfError(snd_pcm_format_set_silence(format, pcmOutBufferPtr, latency*channels), "silence error");
+				throwIfError(snd_pcm_format_set_silence(format, pcmInBufferPtr, latency*channels), "silence error");               
+				
+				// fill playback buffer
+                throwIfError(writebuf(playback_handle, pcmOutBufferPtr, latency, &state.numFramesOut), "write error");				
+                throwIfError(writebuf(playback_handle, pcmOutBufferPtr, latency, &state.numFramesOut), "write error");
+
+                throwIfError(snd_pcm_start(capture_handle), "start error");
+				
+
+				gettimestamp(playback_handle, &state.tPlaybackStarted);
+				gettimestamp(capture_handle, &state.tCaptureStarted);
+
 					
 					ssize_t r;
-                int ok = 1;
                 size_t in_max = 0;
-                while (ok && m_running) {
-					processActionQueueInAudioThread();    
-                        if (use_poll) {
-                                /* use poll to wait for next event */
-                                snd_pcm_wait(chandle, 1000);
+                while (m_running && !state.restart) {
+					processActionQueueInAudioThread();   
+					
+                        if (m_poll) {
+                                snd_pcm_wait(capture_handle, 1000);
                         }
 						
-                        if ((r = readbuf(chandle, pcmInBufferPtr, latency, &frames_in, &in_max)) < 0) {
+
+						snd_pcm_delay(capture_handle, &delay);
+						if (delay > state.maxDelayCapture)
+							state.maxDelayCapture = delay;
+						
+						// read capture samples
+                        if ((r = readbuf(capture_handle, pcmInBufferPtr, latency, &state.numFramesIn, &state.maxInLatency)) < 0) {
 							// overrun
-							std::cout << "overrun" << std::endl;
-                            ok = 0;
+							state.numOverruns++;
+							state.restart = true;
 						}
 						
 						
@@ -514,100 +516,56 @@ int throwIfError(int err, const std::string &msg) {
                 }
             }
 						
-						
-		//for (int ii = 0; ii < blockSize; ii++) {
+							// test noise
+		//for (int ii = 0; ii < latency; ii++) {
 		//		(pcmOutPtr)[0 + (ii*m_numChannelsPlayback)] = (rand() % (32760 * 2)) - 3276;
 		//	}
 						
-                        
-                        if (writebuf(phandle, pcmOutBufferPtr, latency, &frames_out) < 0) {
+			
+			snd_pcm_delay(playback_handle, &delay);
+			if (delay > state.maxDelayPlayback)
+				state.maxDelayPlayback = delay;
+			
+						
+						// write playback samples                        
+                        if (writebuf(playback_handle, pcmOutBufferPtr, latency, &state.numFramesOut) < 0) {
 							// underrun
-							std::cout << "underrun" << std::endl;
-                            ok = 0;
+							state.numUnderruns++;
+							state.restart = true;						
                         }
 						
-						 processSignalBufferObserverInAudioThread(latency);
+						processSignalBufferObserverInAudioThread(latency);
                 }
 				
-				std::cout << "restarting" << std::endl;
 
-                snd_pcm_drop(chandle);
-                snd_pcm_nonblock(phandle, 0);
-                snd_pcm_drain(phandle);
-                snd_pcm_nonblock(phandle, !block ? 1 : 0);
+                snd_pcm_drop(capture_handle);
+                snd_pcm_nonblock(playback_handle, 0);
+                snd_pcm_drain(playback_handle);
+                snd_pcm_nonblock(playback_handle, !block ? 1 : 0);
 				
-                snd_pcm_unlink(chandle);
-                snd_pcm_hw_free(phandle);
-                snd_pcm_hw_free(chandle);
-				
-				//break;
+                snd_pcm_unlink(capture_handle);
+                snd_pcm_hw_free(playback_handle);
+                snd_pcm_hw_free(capture_handle);
         }
-        snd_pcm_close(phandle);
-        snd_pcm_close(chandle);
 
+		state.show();
+		
+        snd_pcm_close(playback_handle);
+        snd_pcm_close(capture_handle);
 		playback_handle = nullptr;
 		capture_handle = nullptr;
 		
         return;
 
 		/*
-        while (m_running) {
-            processActionQueueInAudioThread();       
-
-            // read capture data
-			auto avail = snd_pcm_avail_update(capture_handle);
-			if (avail > 0 || true) {
-				while ((inframes = snd_pcm_readi(capture_handle, pcmInPtr, blockSize)) < 0) {
-					if (inframes == -EAGAIN)
-						continue;
-					std::cerr << "overrun " << m_numOverruns << std::endl;
-					m_numOverruns++;
-					restarting = true;
-					snd_pcm_prepare(capture_handle);
-				}
-			
-
-				if (inframes != blockSize) {
-					m_numShortReads++;
-					fprintf(stderr, "Short read from capture device: %d, expecting %d\n", inframes, blockSize);
-					// todo: zero set buffer at [inframes...blockSize]
-				}
-			}
-			/* * /
-
+ 
 			// Vector processing: http://stackoverflow.com/questions/16031149/speedup-a-short-to-float-cast
 			// in JACK look for write_via_copy
 			// TODO: vector optimiazation
 
 
 
-			//for (int ii = 0; ii < blockSize; ii++) {
-				//(pcmOutPtr)[0 + (ii*m_numChannelsPlayback)] = (rand() % (32760 * 2)) - 3276;
-			//}
-
-
-            // write playback data
-            while ((outframes = snd_pcm_writei(playback_handle, pcmOutPtr, blockSize)) < 0) {
-                if (outframes == -EAGAIN)
-                    continue;
-				if(m_numUnderruns % 100000 == 0)
-					std::cerr << "underrun " << m_numUnderruns << std::endl;
-                m_numUnderruns++;
-                //restarting = true;
-                //snd_pcm_prepare(playback_handle);
-
-				//for (int i = 0; i < fragments; i += 1)
-				//	snd_pcm_writei(playback_handle, pcmOut.data(), blockSize);
-            }
-            if (outframes != blockSize){
-                m_numShortWrites++;
-                fprintf(stderr, "Short write to playback device: %d, expecting %d\n", outframes, blockSize);
-            }
-
-            processSignalBufferObserverInAudioThread(blockSize);
-    }
-*/
-
+		*/
 
 }
 
@@ -626,4 +584,29 @@ int throwIfError(int err, const std::string &msg) {
         return *this;
     }
     */
+void AudioDriverAlsa::ProcessState::show() {
+	std::cout << "framesIn|Out: " << numFramesIn << " | " << numFramesOut << std::endl;
+	std::cout << "maxInLatency:" << maxInLatency << std::endl;
+	std::cout << "maxDelay{Playback|Capture}:" << maxDelayPlayback << " | " << maxDelayCapture << std::endl;
+	std::cout << "total {over|under}Runs: " << numOverruns << " | " << numUnderruns << std::endl;
+	std::cout << "hwSync: " << isHwSync() << std::endl;
 }
+
+bool AudioDriverAlsa::ProcessState::isHwSync() {
+	return (tPlaybackStarted.tv_sec == tCaptureStarted.tv_sec &&
+	    tPlaybackStarted.tv_usec == tCaptureStarted.tv_usec);
+}
+
+
+void AudioDriverAlsa::listDevices() {
+	int card = -1;
+	if (snd_card_next(&card) < 0 || card < 0) {
+		return;
+	}
+
+	k
+}
+
+}
+
+

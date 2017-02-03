@@ -17,7 +17,7 @@
 
 namespace autil {
 
-	UdpSocket::UdpSocket(std::string receiverAddress, int port) {
+	UdpSocket::UdpSocket(std::string receiverAddress, int port) : receiverAddress(receiverAddress), port(port) {
 		blockIndex_ = 0;
 #if WIN32
 		static bool needWSInit = true;
@@ -111,11 +111,11 @@ namespace autil {
 	bool UdpSocket::Send(const std::vector<const std::vector<float>*> &samples)
 	{
 		auto blockSize = samples[0]->size();
-		std::vector<const float *> ps(samples.size());
+		std::vector<const float *> ps;
 
 		for (auto s : samples) {
 			if (s->size() != blockSize)
-				throw std::invalid_argument("Channels must have equal length! (" + std::to_string(s->size()) + " vs " + std::to_string(blockSize) + ")");
+				throw std::invalid_argument("Channels must have equal length! (" + std::to_string(blockSize) + " vs " + std::to_string(s->size())  + ")");
 			ps.push_back(s->data());
 		}
 		return sendBlock(ps, blockSize, blockIndex_++);
@@ -123,6 +123,10 @@ namespace autil {
 
 	bool UdpSocket::sendBlock( const std::vector<const float*> &samples, size_t blockSize, int16_t blockIndex)
 	{
+		if (blockIndex == 0) {
+			
+			LOG(logINFO) << "Sending " << samples.size() << "ch of " << blockSize << " samples " << receiverAddress << ":" << port;
+		}
 		// header: [index|#channels|blockLength|1|ch0_norm|ch1_norm...|chN_norm]
 		int headerLen = 4 * sizeof(int8_t) + sizeof(int8_t)*samples.size();
 

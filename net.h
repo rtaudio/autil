@@ -17,6 +17,9 @@ private:
     int soc;
 	struct sockaddr_in *sa;
 	short blockIndex_;
+
+	std::string receiverAddress;
+	int port;
 public:
 	UdpSocket(std::string receiverAddress, int port);
 	~UdpSocket();

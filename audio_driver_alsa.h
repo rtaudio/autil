@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include "audio_driver_base.h"
 
 #include <alsa/asoundlib.h>
@@ -39,16 +40,45 @@ namespace autil {
 
 	private:
         RttThread *m_audioThread;
+		
+		struct ProcessState {
+			size_t numFramesIn;
+			size_t numFramesOut;
+			
+			size_t maxInLatency;
+			size_t maxDelayPlayback, maxDelayCapture;
+			
+			bool restart;
 
-        int m_numShortWrites;
-        int m_numUnderruns;
-        int m_numShortReads;
-        int m_numOverruns;
+			std::chrono::high_resolution_clock::time_point tStarted;
+			
+			int numOverruns;//number of times the capture buffer was not read in time
+			int numUnderruns;//number of times the playback buffers was not filled in time
+			
+			//int m_numShortWrites;
+			//int m_numShortReads;
+			
+			snd_timestamp_t tPlaybackStarted, tCaptureStarted;
+			
+			inline void reset() { memset(this, 0, sizeof(*this)); }
+			inline ProcessState() { reset(); }
+
+			void show();
+			bool isHwSync();
+			inline int xruns() { return numOverruns + numUnderruns; }
+		};
+
+
+        ProcessState state;
+		
+		bool m_poll;//energy saving
+
+		
 
 		snd_pcm_t      *playback_handle;
 		snd_pcm_t      *capture_handle;
 		
-        void process();
+		virtual void process();
 	};
 
 }
