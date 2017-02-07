@@ -3,3 +3,9 @@
 /Makefile
 /cmake_install.cmake
 /libautil.a
+
+/*.sln
+/*.vcxproj
+/*.vcxproj.filters
+
+/CMakeFiles/
