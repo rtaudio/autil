@@ -53,7 +53,7 @@ namespace autil {
 		Rw = Rz = iseed;
 	}
 
-	void test::generateSweep(float *buf, int len, int samplingRate) {
+	void test::generateSweep(float *buf, int len, float samplingRate) {
 		const float bw = 2.0f / 12.0f;
 		const float fMin = 5.0f, fMax = 20000.0f;
 		const float sr = samplingRate;
@@ -70,7 +70,7 @@ namespace autil {
 		}
 
 		// fade out using hann window
-		int fadeLen = std::round(100.0f * sr / f2 + 2.0f);
+		int fadeLen = (int)std::round(100.0f * sr / f2 + 2.0f);
 		for (int i = 0; i < fadeLen; i++) {
 			float h = std::cos(PI *0.5f * ((float)i) / (float)(fadeLen - 1));
 			buf[lenSweep - fadeLen + i] *= h*h;

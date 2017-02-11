@@ -12,7 +12,7 @@
 #endif
 
 #include "net.h"
-#include "logging.h"
+#include "../pclog/pclog.h"
 #include "signal_buffer.h"
 
 namespace autil {

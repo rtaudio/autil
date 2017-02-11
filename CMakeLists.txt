@@ -30,11 +30,11 @@ endif()
 
 add_library (autil  ${DRIVER_SRCS} signal_buffer.cpp signal_processor.cpp test.cpp file_io.cpp net.cpp)
 
-#
-find_library(SNDFILE_LIB NAMES sndfile sndfile-1 libsndfile libsndfile-1 PATHS $ENV{PROGRAMFILES}/Mega-Nerd/libsndfile/lib )
+#$ENV{PROGRAMFILES}
+find_library(SNDFILE_LIB NAMES sndfile sndfile-1 libsndfile libsndfile-1 PATHS "C:/Program Files (x86)/Mega-Nerd/libsndfile/lib" )
 
 target_link_libraries (autil ${DRIVER_LIBS} ${SNDFILE_LIB})
-target_include_directories (autil PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${DRIVER_INCS} ../)
+target_include_directories (autil PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${DRIVER_INCS}  "C:/Program Files (x86)/Mega-Nerd/libsndfile/include" ../)
 
 #debug
-add_definitions("-g -ggdb")
+#add_definitions("-g -ggdb")
