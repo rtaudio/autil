@@ -9,3 +9,8 @@
 /*.vcxproj.filters
 
 /CMakeFiles/
+*.lib
+*.pdb
+*.obj
+*.log
+*.tlog
